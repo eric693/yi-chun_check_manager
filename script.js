@@ -100,15 +100,19 @@ function renderTranslations(container = document) {
  * @param {string} [loadingId="loading"] - 顯示 loading 狀態的 DOM 元素 ID。
  * @returns {Promise<object>} - 回傳一個包含 API 回應資料的 Promise。
  */
-async function callApifetch(action, loadingId = "loading") {
+async function callApifetch(action, loadingId = "loading", options = {}) {
+    const { silent = false, timeoutMs = 0 } = options;
     const token = localStorage.getItem("sessionToken");
     const url = `${API_CONFIG.apiUrl}?action=${action}&token=${token}`;
     
     const loadingEl = document.getElementById(loadingId);
     if (loadingEl) loadingEl.style.display = "block";
     
+    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    
     try {
-        const response = await fetch(url);
+        const response = await fetch(url, controller ? { signal: controller.signal } : undefined);
         
         if (!response.ok) {
             throw new Error(`HTTP 錯誤: ${response.status}`);
@@ -139,10 +143,11 @@ async function callApifetch(action, loadingId = "loading") {
         
         return data;
     } catch (error) {
-        showNotification(t("CONNECTION_FAILED"), "error");
+        if (!silent) showNotification(t("CONNECTION_FAILED"), "error");
         console.error("API 呼叫失敗:", error);
         throw error;
     } finally {
+        if (timer) clearTimeout(timer);
         if (loadingEl) loadingEl.style.display = "none";
     }
 }
@@ -3905,16 +3910,41 @@ async function doPunch(type) {
 
         const action = `punch&type=${encodeURIComponent(type)}&lat=${lat}&lng=${lng}&datetime=${encodeURIComponent(datetime)}&note=${encodeURIComponent(navigator.userAgent)}`;
 
-        try {
-            const res = await callApifetch(action);
-            const msg = t(res.code || "UNKNOWN_ERROR", res.params || {});
-            showNotification(msg, res.ok ? "success" : "error");
-
-            if (res.ok && type === '上班') {
-                clearShiftCache();
+        // 行動網路不穩時自動重試；若前一次其實已寫入，後端會回 ERR_DUPLICATE_PUNCH，視為成功
+        const MAX_ATTEMPTS = 3;
+        let res = null;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                res = await callApifetch(action, "loading", { silent: true, timeoutMs: 30000 });
+                if (attempt > 1 && res.code === 'ERR_DUPLICATE_PUNCH') {
+                    res = { ok: true, code: 'PUNCH_SUCCESS', params: { type: type } };
+                }
+                break;
+            } catch (err) {
+                lastErr = err;
+                console.error(`打卡第 ${attempt} 次失敗:`, err);
+                if (attempt < MAX_ATTEMPTS) {
+                    showNotification(`連線不穩，正在重試（${attempt}/${MAX_ATTEMPTS - 1}）...`, 'warning');
+                    await new Promise(r => setTimeout(r, 1500 * attempt));
+                }
             }
-        } catch (err) {
-            console.error(err);
+        }
+
+        try {
+            if (res) {
+                const msg = (res.code && translations[res.code])
+                    ? t(res.code, res.params || {})
+                    : (res.msg || t(res.code || "UNKNOWN_ERROR", res.params || {}));
+                showNotification(msg, res.ok ? "success" : "error");
+
+                if (res.ok && type === '上班') {
+                    clearShiftCache();
+                }
+            } else {
+                const reason = lastErr && lastErr.name === 'AbortError' ? '伺服器回應逾時' : '網路連線中斷';
+                showNotification(`${type}打卡失敗（${reason}）。請確認網路後再按一次；若仍失敗，請重新整理頁面或改用補打卡。`, 'error');
+            }
         } finally {
             generalButtonState(button, 'idle');
             _isPunching = false;  //  釋放鎖
@@ -3923,7 +3953,7 @@ async function doPunch(type) {
         showNotification(t("ERROR_GEOLOCATION", { msg: err.message }), "error");
         generalButtonState(button, 'idle');
         _isPunching = false;  //  釋放鎖（定位失敗也要釋放）
-    });
+    }, { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
 }
 
 /**
