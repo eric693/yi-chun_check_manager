@@ -451,7 +451,7 @@ function handleGetAbnormalRecords(params) {
   const { month, userId } = params;
   if (!month) return { ok: false, code: "ERR_MISSING_MONTH" };
   const records = getAttendanceRecords(month, userId);
-  const abnormalResults = checkAttendanceAbnormal(records);
+  const abnormalResults = checkAttendanceAbnormal(records, userId, month);
   return { ok: true, records: abnormalResults };
 }
 
@@ -2312,7 +2312,7 @@ function handleInitApp(params) {
     const userId = session.user.userId;
     
     const records = getAttendanceRecords(month, userId);
-    const abnormalResults = checkAttendanceAbnormal(records);
+    const abnormalResults = checkAttendanceAbnormal(records, userId, month);
     
     //  3. 取得加班記錄（新增）
     const overtimeRecords = getApprovedOvertimeRecords(userId, month);

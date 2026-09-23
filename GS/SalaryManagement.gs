@@ -1246,6 +1246,7 @@ function getEmployeeMonthlyLeave(employeeId, yearMonth) {
         leaveType: leaveType,
         startDate: startDate,
         leaveDays: leaveDays,
+        leaveHours: parseFloat(row[7]) || 0,   // H 欄：實際請假時數
         reviewStatus: "核准"
       });
     }
@@ -1458,6 +1459,8 @@ function calculateHourlySalary(employeeId, yearMonth) {
     let sickLeaveDeduction = 0;
     let personalLeaveHours = 0;    // ⭐ 改為時數
     let personalLeaveDeduction = 0;
+    let sickLeavePay = 0;          // ⭐ 病假半薪（時薪制為加發項目）
+    let hasLeaveRecord = false;    // ⭐ 是否有請假（用於全勤獎金判定）
 
     if (leaveRecords.success && leaveRecords.data && leaveRecords.data.length > 0) {
       Logger.log(` 找到 ${leaveRecords.data.length} 筆請假記錄`);
@@ -1466,36 +1469,39 @@ function calculateHourlySalary(employeeId, yearMonth) {
         if (record.reviewStatus === '核准') {
           const leaveType = String(record.leaveType).toUpperCase();
           const days = parseFloat(record.leaveDays) || 0;
-          const dailyHours = 8; // 一天工作8小時
-          const deductionHours = days * dailyHours; // ⭐ 轉換為時數
+          // ⭐ 優先使用請假紀錄的實際時數，沒有才用天數換算
+          const leaveHours = parseFloat(record.leaveHours) || (days * 8);
           
-          // ⭐ 病假：扣半薪（時薪 × 工時 × 50%）
+          // ⭐⭐⭐ 時薪制：基本薪資 = 實際打卡工時 × 時薪
+          //     請假當天沒有打卡，本來就不會計薪，因此「不再扣款」，
+          //     否則等同同一段時間被扣兩次（未計薪 + 請假扣款）。
+          
+          // 病假：法定折半發給 → 對時薪制是「加發半薪」，不是扣款
           if (leaveType === 'SICK_LEAVE' || leaveType === '病假') {
-            sickLeaveHours += deductionHours; // ⭐ 累計時數
-            const deduction = Math.round(hourlyRate * deductionHours * 0.5);
-            sickLeaveDeduction += deduction;
-            Logger.log(`   病假 ${days} 天 = ${deductionHours}h × $${hourlyRate} × 50% = $${deduction}`);
+            sickLeaveHours += leaveHours;
+            const pay = Math.round(hourlyRate * leaveHours * 0.5);
+            sickLeavePay += pay;
+            Logger.log(`   病假 ${leaveHours}h × $${hourlyRate} × 50% = 加發 $${pay}`);
           }
           
-          // ⭐ 事假：扣全薪（時薪 × 工時）
+          // 事假：不給薪。未出勤已未計薪，故不另行扣款
           if (leaveType === 'PERSONAL_LEAVE' || leaveType === '事假') {
-            personalLeaveHours += deductionHours; // ⭐ 累計時數
-            const deduction = Math.round(hourlyRate * deductionHours);
-            personalLeaveDeduction += deduction;
-            Logger.log(`   事假 ${days} 天 = ${deductionHours}h × $${hourlyRate} = $${deduction}`);
+            personalLeaveHours += leaveHours;
+            Logger.log(`   事假 ${leaveHours}h：未出勤已未計薪，不另行扣款`);
           }
+          
+          hasLeaveRecord = true;
         }
       });
       
-      leaveDeduction = sickLeaveDeduction + personalLeaveDeduction;
+      leaveDeduction = 0; // ⭐ 時薪制不重複扣款
       
-      Logger.log(`\n 請假扣款統計:`);
-      Logger.log(`   病假: ${sickLeaveHours} 小時，扣款 $${sickLeaveDeduction} (半薪)`);
-      Logger.log(`   事假: ${personalLeaveHours} 小時，扣款 $${personalLeaveDeduction} (全薪)`);
-      Logger.log(`   合計扣款: $${leaveDeduction}`);
+      Logger.log(`\n 請假統計（時薪制）:`);
+      Logger.log(`   病假: ${sickLeaveHours} 小時，加發 $${sickLeavePay} (半薪)`);
+      Logger.log(`   事假: ${personalLeaveHours} 小時，不計薪也不扣款`);
       
       // ⭐ 如果有請假，取消全勤獎金
-      if (leaveDeduction > 0) {
+      if (hasLeaveRecord) {
         attendanceBonus = 0;
         Logger.log(` 有請假記錄，取消全勤獎金`);
       }
@@ -1505,6 +1511,7 @@ function calculateHourlySalary(employeeId, yearMonth) {
     
     // 9. 應發總額
     const grossSalary = basePay + 
+                       sickLeavePay +      // ⭐ 病假半薪
                        positionAllowance + 
                        mealAllowance + 
                        transportAllowance + 
@@ -2285,13 +2292,14 @@ function calculateMonthlySalaryInternal(employeeId, yearMonth) {
         if (record.reviewStatus === '核准') {
           const leaveType = String(record.leaveType).toUpperCase();
           const days = parseFloat(record.leaveDays) || 0;
-          const hours = days * 8;
+          const hours = parseFloat(record.leaveHours) || (days * 8);
           const dailyRate = Math.round(baseSalary / 30);
+          const leaveDays = hours / 8;   // ⭐ 以實際時數換算天數
           
           // 病假：扣半薪
           if (leaveType === 'SICK_LEAVE' || leaveType === '病假') {
             sickLeaveHours += hours;
-            const deduction = Math.round(days * dailyRate * 0.5);
+            const deduction = Math.round(leaveDays * dailyRate * 0.5);
             sickLeaveDeduction += deduction;
             Logger.log(`   病假 ${days} 天 = ${hours}h × $${dailyRate} × 50% = $${deduction}`);
           }
@@ -2299,7 +2307,7 @@ function calculateMonthlySalaryInternal(employeeId, yearMonth) {
           // 事假：扣全薪
           if (leaveType === 'PERSONAL_LEAVE' || leaveType === '事假') {
             personalLeaveHours += hours;
-            const deduction = Math.round(days * dailyRate);
+            const deduction = Math.round(leaveDays * dailyRate);
             personalLeaveDeduction += deduction;
             Logger.log(`   事假 ${days} 天 = ${hours}h × $${dailyRate} = $${deduction}`);
           }
@@ -4371,7 +4379,7 @@ function calculateWeeklySalary(employeeId, yearMonth) {
       leaveRecords.data.forEach(function(r) {
         if (r.reviewStatus === '核准') {
           const leaveType = String(r.leaveType).toUpperCase();
-          const deductHours = (parseFloat(r.leaveDays) || 0) * 8;
+          const deductHours = parseFloat(r.leaveHours) || ((parseFloat(r.leaveDays) || 0) * 8);
           if (leaveType === 'SICK_LEAVE' || leaveType === '病假') {
             sickLeaveHours += deductHours;
             sickLeaveDeduction += Math.round(hourlyEquiv * deductHours * 0.5);

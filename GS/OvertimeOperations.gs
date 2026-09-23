@@ -265,6 +265,18 @@ function reviewOvertimeRequest(sessionToken, rowNumber, action, comment) {
   
   try {
     const record = sheet.getRange(rowNumber, 1, 1, 15).getValues()[0];
+    
+    //  防重複審核：已審核過的申請不可再審（避免補休時數被重複累加）
+    const currentStatus = String(record[9] || '').trim().toLowerCase();
+    if (currentStatus === 'approved' || currentStatus === 'rejected') {
+      Logger.log(` 此加班申請已審核過，目前狀態: ${currentStatus}`);
+      return {
+        ok: false,
+        code: "ERR_ALREADY_REVIEWED",
+        msg: `此加班申請已審核過（目前狀態：${currentStatus}）`
+      };
+    }
+    
     const requestId = record[0];
     const employeeId = record[1];
     const employeeName = record[2];
@@ -296,6 +308,22 @@ function reviewOvertimeRequest(sessionToken, rowNumber, action, comment) {
     }
     
     if (isApprove) {
+      //  累積補休時數到「假期餘額」的加班補休假欄位
+      //  （原本核准加班不會增加補休額度，導致補休永遠是 0、無法請）
+      try {
+        const compHours = parseFloat(record[14]) || 0;
+        if (compHours > 0) {
+          const addResult = addCompTimeOffBalance_(employeeId, compHours);
+          if (addResult.ok) {
+            Logger.log(` 已為 ${employeeName} 累積補休 ${compHours} 小時，目前共 ${addResult.balance} 小時`);
+          } else {
+            Logger.log(` 補休時數累積失敗: ${addResult.msg}`);
+          }
+        }
+      } catch (compErr) {
+        Logger.log(` 補休時數累積時發生錯誤: ${compErr.message}`);
+      }
+      
       try {
         let yearMonth = '';
         if (overtimeDate instanceof Date) {
@@ -353,6 +381,38 @@ function reviewOvertimeRequest(sessionToken, rowNumber, action, comment) {
       ok: false, 
       msg: `審核失敗: ${error.message}` 
     };
+  }
+}
+
+/**
+ *  累積補休時數到「假期餘額」工作表（Q 欄：加班補休假）
+ * @param {string} userId - 員工ID
+ * @param {number} hours - 要累積的補休時數
+ */
+function addCompTimeOffBalance_(userId, hours) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('假期餘額');
+    if (!sheet) return { ok: false, msg: '找不到假期餘額工作表' };
+
+    const COMP_TIME_OFF_COLUMN = 17; // Q 欄：加班補休假
+    const values = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < values.length; i++) {
+      if (String(values[i][0]).trim() === String(userId).trim()) {
+        const current = parseFloat(values[i][COMP_TIME_OFF_COLUMN - 1]) || 0;
+        const newBalance = current + hours;
+
+        sheet.getRange(i + 1, COMP_TIME_OFF_COLUMN).setValue(newBalance);
+        sheet.getRange(i + 1, 19).setValue(new Date()); // S 欄：更新時間
+
+        return { ok: true, balance: newBalance };
+      }
+    }
+
+    return { ok: false, msg: '找不到該員工的假期餘額記錄' };
+
+  } catch (error) {
+    return { ok: false, msg: error.message };
   }
 }
 

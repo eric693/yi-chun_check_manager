@@ -250,86 +250,77 @@ function submitLeaveRequest(sessionToken, leaveType, startDateTime, endDateTime,
  */
 function calculateWorkHoursAndDays_Unlimited(start, end) {
   try {
-    Logger.log(' 計算工作時數（無時段限制版）');
+    Logger.log(' 計算工作時數（逐日計算版）');
     Logger.log(`   開始: ${start.toISOString()}`);
     Logger.log(`   結束: ${end.toISOString()}`);
-    
+
     // ⭐ 配置選項
-    const DEDUCT_LUNCH = true;   // 是否扣除午休時間（true = 扣除，false = 不扣除）
-    const LUNCH_START = 12;      // 午休開始（小時）
-    const LUNCH_END = 13;        // 午休結束（小時）
-    
-    // 計算總毫秒數
-    const totalMs = end - start;
-    
-    // 轉換為小時
-    let totalHours = totalMs / (1000 * 60 * 60);
-    
-    Logger.log(`   ⏱ 原始時數: ${totalHours.toFixed(2)} 小時`);
-    
-    // ⭐ 扣除午休時間（如果啟用）
-    if (DEDUCT_LUNCH) {
-      Logger.log('    開始計算午休扣除...');
-      
-      // 計算跨越的天數
-      const startDate = new Date(start.getFullYear(), start.getMonth(), start.getDate());
-      const endDate = new Date(end.getFullYear(), end.getMonth(), end.getDate());
-      
-      let lunchHoursToDeduct = 0;
-      
-      // 遍歷每一天，檢查是否跨越午休時間
-      let currentDate = new Date(startDate);
-      
-      while (currentDate <= endDate) {
-        // 當天的午休開始和結束時間
-        const lunchStartTime = new Date(currentDate);
-        lunchStartTime.setHours(LUNCH_START, 0, 0, 0);
-        
-        const lunchEndTime = new Date(currentDate);
-        lunchEndTime.setHours(LUNCH_END, 0, 0, 0);
-        
-        // 計算請假時間與午休時間的交集
-        const overlapStart = start > lunchStartTime ? start : lunchStartTime;
-        const overlapEnd = end < lunchEndTime ? end : lunchEndTime;
-        
-        // 如果有交集，計算重疊的時間
-        if (overlapStart < overlapEnd) {
-          const overlapMs = overlapEnd - overlapStart;
-          const overlapHours = overlapMs / (1000 * 60 * 60);
-          lunchHoursToDeduct += overlapHours;
-          
-          Logger.log(`      ${Utilities.formatDate(currentDate, Session.getScriptTimeZone(), 'yyyy-MM-dd')} 扣除: ${overlapHours.toFixed(2)} 小時`);
+    const DEDUCT_LUNCH = true;      // 是否扣除午休時間
+    const LUNCH_START = 12;         // 午休開始（小時）
+    const LUNCH_END = 13;           // 午休結束（小時）
+    const MAX_HOURS_PER_DAY = 8;    // 每日請假時數上限（彈性工時：一天最多算 8 小時）
+
+    let totalHours = 0;
+
+    // 逐日計算：只累計「當天落在請假區間內」的時數，並以每日上限封頂
+    // 這樣跨日請假就不會把下班後與半夜的時間也算進去
+    const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+    const lastDay = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+
+    while (cursor <= lastDay) {
+      const dayStart = new Date(cursor);
+      const dayEnd = new Date(cursor);
+      dayEnd.setDate(dayEnd.getDate() + 1);
+
+      // 當天與請假區間的交集
+      const segStart = start > dayStart ? start : dayStart;
+      const segEnd = end < dayEnd ? end : dayEnd;
+
+      if (segStart < segEnd) {
+        let dayHours = (segEnd - segStart) / (1000 * 60 * 60);
+
+        // 扣除當天午休與請假區間的重疊
+        if (DEDUCT_LUNCH) {
+          const lunchStartTime = new Date(cursor);
+          lunchStartTime.setHours(LUNCH_START, 0, 0, 0);
+
+          const lunchEndTime = new Date(cursor);
+          lunchEndTime.setHours(LUNCH_END, 0, 0, 0);
+
+          const overlapStart = segStart > lunchStartTime ? segStart : lunchStartTime;
+          const overlapEnd = segEnd < lunchEndTime ? segEnd : lunchEndTime;
+
+          if (overlapStart < overlapEnd) {
+            dayHours -= (overlapEnd - overlapStart) / (1000 * 60 * 60);
+          }
         }
-        
-        // 移到下一天
-        currentDate.setDate(currentDate.getDate() + 1);
+
+        // 每日上限：整天請假一律算 8 小時
+        if (dayHours > MAX_HOURS_PER_DAY) {
+          dayHours = MAX_HOURS_PER_DAY;
+        }
+        if (dayHours < 0) {
+          dayHours = 0;
+        }
+
+        Logger.log(`      ${Utilities.formatDate(cursor, Session.getScriptTimeZone(), 'yyyy-MM-dd')} 計入: ${dayHours.toFixed(2)} 小時`);
+        totalHours += dayHours;
       }
-      
-      totalHours -= lunchHoursToDeduct;
-      
-      if (lunchHoursToDeduct > 0) {
-        Logger.log(`    總共扣除午休: ${lunchHoursToDeduct.toFixed(2)} 小時`);
-      } else {
-        Logger.log(`    無需扣除午休`);
-      }
-    } else {
-      Logger.log('   ℹ 不扣除午休時間');
+
+      cursor.setDate(cursor.getDate() + 1);
     }
-    
-    // 確保不會是負數
-    totalHours = Math.max(0, totalHours);
-    
+
     // 四捨五入到小數點後 2 位
     const finalHours = Math.round(totalHours * 100) / 100;
-    const days = Math.round((finalHours / 8) * 100) / 100;
-    
+    const days = Math.round((finalHours / MAX_HOURS_PER_DAY) * 100) / 100;
+
     Logger.log(`    最終工時: ${finalHours} 小時 = ${days} 天`);
-    
+
     return {
       workHours: finalHours,
       days: days
     };
-    
+
   } catch (error) {
     Logger.log(` calculateWorkHoursAndDays_Unlimited 錯誤: ${error.message}`);
     return { workHours: 0, days: 0 };
@@ -759,6 +750,18 @@ function reviewLeaveRequest(sessionToken, rowNumber, reviewAction, comment) {
     const sheet = getLeaveRecordsSheet();
     const record = sheet.getRange(rowNumber, 1, 1, 14).getValues()[0];
     
+    //  防重複審核：只有 PENDING 的申請可以審核
+    //  （避免網路逾時後重按，造成假期餘額被重複扣除）
+    const currentStatus = String(record[10]).trim();
+    if (currentStatus !== 'PENDING') {
+      Logger.log(` 此申請已被審核過，目前狀態: ${currentStatus}`);
+      return {
+        ok: false,
+        code: "ERR_ALREADY_REVIEWED",
+        msg: "此申請已被審核過（目前狀態：" + currentStatus + "），未重複扣除餘額"
+      };
+    }
+    
     const userId = record[1];
     const employeeName = record[2];
     const leaveType = record[4];
@@ -855,6 +858,22 @@ function deductLeaveBalance(userId, leaveType, hours) {
       'COMP_TIME_OFF': 17,
       'ABSENCE_WITHOUT_LEAVE': 18
     };
+    
+    //  不受額度限制的假別（法定應給，餘額欄位預設 0 會導致永遠無法核准）
+    const NO_QUOTA_LEAVE_TYPES = [
+      'OFFICIAL_LEAVE',           // 公假（含兵役假）
+      'WORK_INJURY_LEAVE',        // 公傷假
+      'NATURAL_DISASTER_LEAVE'    // 天然災害停班
+    ];
+    
+    if (NO_QUOTA_LEAVE_TYPES.indexOf(leaveType) !== -1) {
+      Logger.log(` ${leaveType} 不受額度限制，不扣除餘額`);
+      return {
+        ok: true,
+        remaining: '不限',
+        unlimited: true
+      };
+    }
     
     const columnIndex = leaveTypeColumnMap[leaveType];
     

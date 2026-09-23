@@ -19,12 +19,102 @@ function getDistanceMeters_(lat1, lng1, lat2, lng2) {
 }
 
 /**
+ *  取得員工在指定月份「已核准請假」的所有日期
+ *  用於出勤異常判定：請假的日子不該被當成缺打卡
+ * @param {string} userId - 員工ID
+ * @param {string} month - 月份 yyyy-MM
+ * @returns {Object} 以日期字串為 key 的對照表
+ */
+function getApprovedLeaveDates_(userId, month) {
+  const leaveDates = {};
+
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('請假紀錄');
+    if (!sheet || sheet.getLastRow() < 2) return leaveDates;
+
+    const values = sheet.getDataRange().getValues();
+    const tz = Session.getScriptTimeZone();
+
+    for (let i = 1; i < values.length; i++) {
+      const row = values[i];
+      const rowUserId = String(row[1] || '').trim();
+      const status = String(row[10] || '').trim().toUpperCase();
+
+      if (rowUserId !== userId) continue;
+      if (status !== 'APPROVED' && status !== '核准') continue;
+
+      const start = row[5] ? new Date(row[5]) : null;
+      const end = row[6] ? new Date(row[6]) : start;
+      if (!start || isNaN(start.getTime())) continue;
+
+      // 逐日展開（跨日請假的每一天都要排除）
+      const cursor = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+      const lastDay = (end && !isNaN(end.getTime()))
+        ? new Date(end.getFullYear(), end.getMonth(), end.getDate())
+        : new Date(cursor);
+
+      while (cursor <= lastDay) {
+        const dateStr = Utilities.formatDate(cursor, tz, 'yyyy-MM-dd');
+        if (!month || dateStr.substring(0, 7) === month) {
+          leaveDates[dateStr] = true;
+        }
+        cursor.setDate(cursor.getDate() + 1);
+      }
+    }
+  } catch (err) {
+    Logger.log(' 讀取請假紀錄失敗（出勤異常將不排除請假日）: ' + err.message);
+  }
+
+  return leaveDates;
+}
+
+/**
+ *  取得員工在指定月份的排班日期
+ *  有排班表的員工以排班為準，沒有排班資料才退回「週一~週五」的預設判斷
+ * @param {string} userId - 員工ID
+ * @param {string} month - 月份 yyyy-MM
+ * @returns {Object|null} 以日期字串為 key 的對照表；完全沒有排班資料時回傳 null
+ */
+function getScheduledDates_(userId, month) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('排班表');
+    if (!sheet || sheet.getLastRow() < 2) return null;
+
+    const values = sheet.getDataRange().getValues();
+    const tz = Session.getScriptTimeZone();
+    const scheduled = {};
+    let found = false;
+
+    for (let i = 1; i < values.length; i++) {
+      const row = values[i];
+      if (String(row[1] || '').trim() !== userId) continue;
+      if (String(row[13] || '').trim() === '已刪除') continue;
+      if (!row[3]) continue;
+
+      const shiftDate = new Date(row[3]);
+      if (isNaN(shiftDate.getTime())) continue;
+
+      const dateStr = Utilities.formatDate(shiftDate, tz, 'yyyy-MM-dd');
+      if (dateStr.substring(0, 7) !== month) continue;
+
+      scheduled[dateStr] = true;
+      found = true;
+    }
+
+    return found ? scheduled : null;
+  } catch (err) {
+    Logger.log(' 讀取排班表失敗（出勤異常改用週一~週五判斷）: ' + err.message);
+    return null;
+  }
+}
+
+/**
  * 檢查員工每天的打卡異常狀態，並回傳格式化的異常列表
  * @param {Array} attendanceRows 打卡紀錄，每筆包含：
  * [打卡時間, 員工ID, 薪資, 員工姓名, 上下班, GPS位置, 地點, 備註, 使用裝置詳細訊息]
  * @returns {Array} 每天每位員工的異常結果，格式為 { date: string, reason: string, id: string } 的陣列
  */
-function checkAttendanceAbnormal(attendanceRows) {
+function checkAttendanceAbnormal(attendanceRows, userIdParam, monthParam) {
   const dailyRecords = {};
   const abnormalRecords = [];
   let abnormalIdCounter = 0;
@@ -36,8 +126,9 @@ function checkAttendanceAbnormal(attendanceRows) {
   const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd");
   
   // ===== 步驟 1：按使用者和日期分組 =====
-  let targetUserId = null;
-  let targetMonth = null;
+  //  即使整月都沒有打卡記錄，也要能檢查（原本只從記錄推斷，整月沒打卡就整月不檢查）
+  let targetUserId = userIdParam || null;
+  let targetMonth = monthParam || null;
   
   attendanceRows.forEach(row => {
     try {
@@ -63,18 +154,47 @@ function checkAttendanceAbnormal(attendanceRows) {
   
   // ===== 步驟 2：生成整個月份的日期列表 =====
   const allDatesInMonth = [];
-  if (targetMonth) {
+  if (targetMonth && targetUserId) {
     const [year, month] = targetMonth.split('-').map(Number);
     const daysInMonth = new Date(year, month, 0).getDate();
     
+    //  已核准的請假日、國定假日、排班日
+    const leaveDates = getApprovedLeaveDates_(targetUserId, targetMonth);
+    const scheduledDates = getScheduledDates_(targetUserId, targetMonth);
+    
+    if (scheduledDates) {
+      Logger.log(' 此員工有排班資料，以排班表判斷應出勤日');
+    } else {
+      Logger.log('ℹ 此員工無排班資料，以週一~週五判斷應出勤日');
+    }
+    
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      const dayOfWeek = new Date(year, month - 1, day).getDay();
-      const isWeekend = (dayOfWeek === 0 || dayOfWeek === 6);
       
-      if (dateStr < today && !isWeekend) {
-        allDatesInMonth.push(dateStr);
+      // 只檢查今天以前的日期
+      if (dateStr >= today) continue;
+      
+      //  已核准請假 → 不算異常
+      if (leaveDates[dateStr]) {
+        Logger.log(`⏭ ${dateStr}: 已核准請假，跳過`);
+        continue;
       }
+      
+      //  國定假日 → 不算異常
+      if (typeof isNationalHoliday === 'function' && isNationalHoliday(dateStr)) {
+        Logger.log(`⏭ ${dateStr}: 國定假日，跳過`);
+        continue;
+      }
+      
+      //  應出勤日判斷：有排班表以排班為準，否則退回週一~週五
+      if (scheduledDates) {
+        if (!scheduledDates[dateStr]) continue;
+      } else {
+        const dayOfWeek = new Date(year, month - 1, day).getDay();
+        if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+      }
+      
+      allDatesInMonth.push(dateStr);
     }
     Logger.log(` 本月應檢查的日期數: ${allDatesInMonth.length}`);
   }

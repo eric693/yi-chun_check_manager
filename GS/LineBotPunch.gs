@@ -6794,6 +6794,22 @@ function deductLeaveBalanceByUserId(userId, leaveType, hours) {
       'COMP_TIME_OFF': 16
     };
     
+    //  不受額度限制的假別（法定應給，餘額欄位預設 0 會導致永遠無法核准）
+    const NO_QUOTA_LEAVE_TYPES = [
+      'OFFICIAL_LEAVE',           // 公假（含兵役假）
+      'WORK_INJURY_LEAVE',        // 公傷假
+      'NATURAL_DISASTER_LEAVE'    // 天然災害停班
+    ];
+    
+    if (NO_QUOTA_LEAVE_TYPES.indexOf(leaveType) !== -1) {
+      Logger.log(` ${leaveType} 不受額度限制，不扣除餘額`);
+      return {
+        ok: true,
+        remaining: '不限',
+        unlimited: true
+      };
+    }
+    
     const columnIndex = leaveTypeColumnMap[leaveType];
     
     if (!columnIndex) {
