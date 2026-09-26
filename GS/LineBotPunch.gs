@@ -819,18 +819,52 @@ function formatDateLabel(dateStr) {
   return `${month}/${day} (${weekday})`;
 }
 /**
- * 產生一次性 LINE 打卡 Token（5 分鐘有效）
+ * 產生一次性 LINE 打卡 Token（15 分鐘有效）
  */
+//  LINE 打卡連結有效期（毫秒）
+const LINE_PUNCH_TOKEN_TTL_MS = 15 * 60 * 1000;
+
 function generateLinePunchToken_(userId, punchType) {
+  const props = PropertiesService.getScriptProperties();
+  
+  //  順手清掉過期的舊 token，避免無限累積
+  cleanupExpiredPunchTokens_(props);
+  
   const token = 'LPT' + Utilities.getUuid().replace(/-/g, '').substring(0, 12).toUpperCase();
   const data = JSON.stringify({
     userId: userId,
     punchType: punchType,
-    expiry: new Date().getTime() + 5 * 60 * 1000
+    //  有效期 5 分鐘太短（收訊差、等定位就用掉了），延長為 15 分鐘
+    expiry: new Date().getTime() + LINE_PUNCH_TOKEN_TTL_MS
   });
-  PropertiesService.getScriptProperties().setProperty('LPT_' + token, data);
+  props.setProperty('LPT_' + token, data);
   Logger.log('LINE 打卡 Token 已生成: ' + token + ' (' + punchType + ')');
   return token;
+}
+
+
+/**
+ *  清除已過期的 LINE 打卡 Token
+ */
+function cleanupExpiredPunchTokens_(props) {
+  try {
+    const all = props.getProperties();
+    const now = new Date().getTime();
+    
+    Object.keys(all).forEach(function (key) {
+      if (key.indexOf('LPT_') !== 0) return;
+      try {
+        const data = JSON.parse(all[key]);
+        if (data.expiry && now > data.expiry) {
+          props.deleteProperty(key);
+        }
+      } catch (parseErr) {
+        props.deleteProperty(key); // 格式壞掉的也一併清除
+      }
+    });
+  } catch (err) {
+    Logger.log('清除過期打卡 Token 失敗（不影響打卡）: ' + err.message);
+  }
 }
 
 /**
@@ -885,7 +919,7 @@ function sendLinePunchLink(replyToken, userId, employeeName, punchType) {
           },
           {
             type: 'text',
-            text: '⏳ 連結 5 分鐘內有效',
+            text: '⏳ 連結 15 分鐘內有效',
             size: 'sm',
             color: '#FF5722',
             align: 'center',

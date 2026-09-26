@@ -216,22 +216,50 @@ function handleLinePunchWithToken(params) {
 
     const props = PropertiesService.getScriptProperties();
     const key = 'LPT_' + token;
-    const dataStr = props.getProperty(key);
+    
+    //  同一個連結同時被點兩次時，只讓一個請求進行
+    const lock = LockService.getScriptLock();
+    try {
+      lock.waitLock(10000);
+    } catch (lockErr) {
+      return { ok: false, code: 'ERR_BUSY', msg: '系統忙碌中，請稍後再試一次' };
+    }
+    
+    try {
+      const dataStr = props.getProperty(key);
 
-    if (!dataStr) {
-      return { ok: false, code: 'ERR_LPT_INVALID', msg: '打卡連結無效或已使用，請重新在 LINE 輸入打卡指令' };
+      if (!dataStr) {
+        return { ok: false, code: 'ERR_LPT_INVALID', msg: '此連結已完成打卡或已失效，請在 LINE 重新輸入打卡指令' };
+      }
+
+      const data = JSON.parse(dataStr);
+
+      if (new Date().getTime() > data.expiry) {
+        props.deleteProperty(key);
+        return { ok: false, code: 'ERR_LPT_EXPIRED', msg: '打卡連結已過期，請在 LINE 重新輸入打卡指令' };
+      }
+
+      //  不在這裡刪除 token
+      //  原本一取得 token 就立即刪除，只要之後任何一步失敗
+      //  （不在範圍內、網路中斷…），使用者再點同一個連結就會變成
+      //  「連結無效或已使用」。改為「打卡成功後才刪除」。
+      return doLinePunch_(props, key, data, lat, lng);
+      
+    } finally {
+      lock.releaseLock();
     }
 
-    const data = JSON.parse(dataStr);
+  } catch (err) {
+    Logger.log('handleLinePunchWithToken 錯誤: ' + err.message);
+    return { ok: false, code: 'ERR_INTERNAL', msg: '系統錯誤，請稍後再試' };
+  }
+}
 
-    if (new Date().getTime() > data.expiry) {
-      props.deleteProperty(key);
-      return { ok: false, code: 'ERR_LPT_EXPIRED', msg: '打卡連結已過期（5 分鐘），請重新在 LINE 輸入打卡指令' };
-    }
-
-    // 單次使用：立即刪除 token
-    props.deleteProperty(key);
-
+/**
+ *  實際執行 LINE 打卡（token 僅在成功後刪除）
+ */
+function doLinePunch_(props, key, data, lat, lng) {
+  try {
     const userId    = data.userId;
     const punchType = data.punchType;
     const latF      = parseFloat(lat);
@@ -256,6 +284,9 @@ function handleLinePunchWithToken(params) {
     if (!result.success) {
       return { ok: false, code: 'ERR_PUNCH_FAILED', msg: result.message };
     }
+
+    //  打卡成功，此時才讓連結失效
+    props.deleteProperty(key);
 
     // 推播 LINE 成功通知給本人
     try {
@@ -289,7 +320,7 @@ function handleLinePunchWithToken(params) {
     };
 
   } catch (err) {
-    Logger.log('handleLinePunchWithToken 錯誤: ' + err.message);
+    Logger.log('doLinePunch_ 錯誤: ' + err.message);
     return { ok: false, code: 'ERR_INTERNAL', msg: '系統錯誤，請稍後再試' };
   }
 }

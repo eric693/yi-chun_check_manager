@@ -5146,7 +5146,28 @@ async function handleLinePunchFromUrl() {
             lng: position.coords.longitude
         });
 
-        const res = await callApifetch(`linePunch&${params.toString()}`);
+        //  行動網路不穩時自動重試（後端已改為打卡成功才讓連結失效，重試是安全的）
+        let res = null;
+        let lastErr = null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            try {
+                res = await callApifetch(`linePunch&${params.toString()}`, 'loading', { silent: true, timeoutMs: 30000 });
+                break;
+            } catch (fetchErr) {
+                lastErr = fetchErr;
+                console.error(`LINE 打卡第 ${attempt} 次失敗:`, fetchErr);
+                if (attempt < 3) {
+                    overlay.querySelector('#lpo-sub').textContent = `連線不穩，重試中（${attempt}/2）...`;
+                    await new Promise(r => setTimeout(r, 1500 * attempt));
+                }
+            }
+        }
+
+        if (!res) {
+            const reason = lastErr && lastErr.name === 'AbortError' ? '伺服器回應逾時' : '網路連線中斷';
+            setResult('❌', '打卡失敗', `${reason}。請確認網路後，再點一次同一個連結重試。`, '#f44336');
+            return;
+        }
 
         if (res.ok) {
             const typeText = res.punchType === '上班' ? '🟢 上班打卡' : '🟠 下班打卡';
@@ -5179,10 +5200,11 @@ async function handleLinePunchFromUrl() {
             await loadAbnormalRecordsInBackground();
         } else {
             const msgMap = {
-                ERR_LPT_INVALID:  '連結無效或已使用，請重新在 LINE 輸入打卡指令',
-                ERR_LPT_EXPIRED:  '連結已過期（5 分鐘），請重新在 LINE 輸入打卡指令',
-                ERR_NOT_IN_RANGE: res.msg || '不在打卡範圍內',
-                ERR_DUPLICATE_PUNCH: '您剛剛已打過卡了'
+                ERR_LPT_INVALID:  '此連結已完成打卡或已失效。請先在 LINE 輸入「查詢」確認是否已打卡成功；若尚未打卡，請重新輸入打卡指令取得新連結。',
+                ERR_LPT_EXPIRED:  '連結已過期（15 分鐘），請在 LINE 重新輸入打卡指令',
+                ERR_NOT_IN_RANGE: (res.msg || '不在打卡範圍內') + '\n（可移動到正確位置後，再點一次同一個連結重試）',
+                ERR_DUPLICATE_PUNCH: '您剛剛已打過卡了',
+                ERR_BUSY: '系統忙碌中，請再點一次連結重試'
             };
             setResult('❌', '打卡失敗', msgMap[res.code] || res.msg || '請稍後再試', '#f44336');
         }
