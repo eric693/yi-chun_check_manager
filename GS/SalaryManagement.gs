@@ -1825,42 +1825,81 @@ function getEmployeeMonthlyAttendanceInternal(employeeId, yearMonth) {
     // ⭐⭐⭐ 關鍵修正：配對上下班記錄並計算工時
     const records = [];
     
-    Object.keys(recordsByDate).forEach(date => {
+    const sortedDates = Object.keys(recordsByDate).sort();
+    
+    //  記錄已被前一天「跨夜班」用掉的下班卡，避免重複配對
+    const consumedPunchOut = {};
+    
+    sortedDates.forEach((date, dateIndex) => {
       const dayPunches = recordsByDate[date];
       
       // 按時間排序
       dayPunches.sort((a, b) => a.fullDateTime - b.fullDateTime);
       
-      // 找出上班和下班打卡
       const punchIns = dayPunches.filter(p => p.type === '上班');
-      const punchOuts = dayPunches.filter(p => p.type === '下班');
+      let punchOuts = dayPunches.filter(p => p.type === '下班');
+      
+      //  排除已被前一天跨夜配對用掉的下班卡
+      if (consumedPunchOut[date]) {
+        punchOuts = punchOuts.filter(p => p.time !== consumedPunchOut[date]);
+      }
       
       let punchIn = null;
       let punchOut = null;
+      let punchOutDateTime = null;
       let workHours = 0;
       
-      // ⭐ 配對邏輯：取第一個上班和最後一個下班
+      // 配對邏輯：取第一個上班和最後一個下班
       if (punchIns.length > 0) {
         punchIn = punchIns[0].time;
       }
       
       if (punchOuts.length > 0) {
         punchOut = punchOuts[punchOuts.length - 1].time;
+        punchOutDateTime = punchOuts[punchOuts.length - 1].fullDateTime;
+      }
+      
+      //  跨夜班：當天有上班卡但沒有下班卡時，
+      //  改抓隔天凌晨的第一張下班卡（且必須早於隔天的第一張上班卡）
+      //  原本固定用同一天的日期相減，夜班會算成 0 小時，整月工時歸零
+      if (punchIn && !punchOut && dateIndex + 1 < sortedDates.length) {
+        const nextDate = sortedDates[dateIndex + 1];
+        const nextDayPunches = recordsByDate[nextDate].slice().sort((a, b) => a.fullDateTime - b.fullDateTime);
+        const nextFirstOut = nextDayPunches.filter(p => p.type === '下班')[0];
+        const nextFirstIn = nextDayPunches.filter(p => p.type === '上班')[0];
+        
+        if (nextFirstOut && (!nextFirstIn || nextFirstOut.fullDateTime < nextFirstIn.fullDateTime)) {
+          const inDateTime = punchIns[0].fullDateTime;
+          const gapHours = (nextFirstOut.fullDateTime - inDateTime) / (1000 * 60 * 60);
+          
+          if (gapHours > 0 && gapHours <= 16) {
+            punchOut = nextFirstOut.time + '(隔日)';
+            punchOutDateTime = nextFirstOut.fullDateTime;
+            consumedPunchOut[nextDate] = nextFirstOut.time;
+            Logger.log(`    ${date}: 偵測到跨夜班，下班卡為 ${nextDate} ${nextFirstOut.time}`);
+          }
+        }
       }
       
       // 計算工時
-      if (punchIn && punchOut) {
+      if (punchIn && punchOutDateTime) {
         try {
-          const inTime = new Date(`${date} ${punchIn}`);
-          const outTime = new Date(`${date} ${punchOut}`);
+          const inTime = punchIns[0].fullDateTime;
+          const outTime = punchOutDateTime;
           const diffMs = outTime - inTime;
           
           if (diffMs > 0) {
             const totalHours = diffMs / (1000 * 60 * 60);
-            const lunchBreak = 1;
-            // workHours = Math.max(0, totalHours - lunchBreak);
-            workHours = Math.floor(Math.max(0, totalHours - lunchBreak));
-            Logger.log(`   ${date}: ${punchIn} ~ ${punchOut} = ${workHours.toFixed(2)}h (原始: ${totalHours.toFixed(2)}h)`);
+            
+            //  午休只在「實際跨越 12:00~13:00」時才扣
+            //  原本不論工時長短一律扣 1 小時，短班（例如 09:00~12:00）會被少算
+            const lunchBreak = calculateLunchDeduction_(inTime, outTime);
+            
+            //  原本用 Math.floor 無條件捨去到整數小時，
+            //  工作 7.9 小時只算 7 小時，時薪員工每天被少算近一小時
+            workHours = Math.round(Math.max(0, totalHours - lunchBreak) * 100) / 100;
+            
+            Logger.log(`   ${date}: ${punchIn} ~ ${punchOut} = ${workHours.toFixed(2)}h (原始: ${totalHours.toFixed(2)}h, 午休: ${lunchBreak}h)`);
           } else {
             Logger.log(`    ${date}: ${punchIn} ~ ${punchOut} 時間異常（下班早於上班）`);
           }
@@ -1870,8 +1909,6 @@ function getEmployeeMonthlyAttendanceInternal(employeeId, yearMonth) {
       } else {
         Logger.log(`    ${date}: 打卡不完整 (上班: ${punchIn || '無'}, 下班: ${punchOut || '無'})`);
       }
-
-      
       
       records.push({
         date: date,
@@ -1893,6 +1930,43 @@ function getEmployeeMonthlyAttendanceInternal(employeeId, yearMonth) {
     Logger.log(' 錯誤堆疊: ' + error.stack);
     return [];
   }
+}
+
+/**
+ *  計算一段上班時間內應扣除的午休時數
+ *  只有實際跨越午休時段（12:00~13:00）才扣，支援跨夜班
+ * @param {Date} inTime - 上班時間
+ * @param {Date} outTime - 下班時間
+ * @returns {number} 應扣除的午休時數
+ */
+function calculateLunchDeduction_(inTime, outTime) {
+  const LUNCH_START = 12;
+  const LUNCH_END = 13;
+  
+  let deduction = 0;
+  
+  // 逐日檢查（跨夜班會橫跨兩天）
+  const cursor = new Date(inTime.getFullYear(), inTime.getMonth(), inTime.getDate());
+  const lastDay = new Date(outTime.getFullYear(), outTime.getMonth(), outTime.getDate());
+  
+  while (cursor <= lastDay) {
+    const lunchStart = new Date(cursor);
+    lunchStart.setHours(LUNCH_START, 0, 0, 0);
+    
+    const lunchEnd = new Date(cursor);
+    lunchEnd.setHours(LUNCH_END, 0, 0, 0);
+    
+    const overlapStart = inTime > lunchStart ? inTime : lunchStart;
+    const overlapEnd = outTime < lunchEnd ? outTime : lunchEnd;
+    
+    if (overlapStart < overlapEnd) {
+      deduction += (overlapEnd - overlapStart) / (1000 * 60 * 60);
+    }
+    
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  
+  return Math.round(deduction * 100) / 100;
 }
 
 /**
@@ -2225,39 +2299,57 @@ function calculateMonthlySalaryInternal(employeeId, yearMonth) {
 
     // 取得該月份的打卡記錄
     const attendanceRecords = getEmployeeMonthlyAttendanceInternal(employeeId, yearMonth);
+    
+    //  已核准請假的日期不計早退（否則請半天假會被「請假扣款 + 早退扣款」扣兩次）
+    const leaveDatesForEarlyCheck = (typeof getApprovedLeaveDates_ === 'function')
+      ? getApprovedLeaveDates_(employeeId, yearMonth)
+      : {};
 
     attendanceRecords.forEach(record => {
       const date = record.date;
       
-      // ⭐⭐⭐ 使用 try-catch 避免錯誤中斷流程
       try {
+        if (leaveDatesForEarlyCheck[date]) {
+          Logger.log(`   ⏭ ${date}: 當日有已核准請假，不計早退`);
+          return;
+        }
+        
         // 取得該日期的排班資訊
         const shiftResult = getEmployeeShiftForDate(employeeId, date);
         
         if (shiftResult && shiftResult.success && shiftResult.hasShift) {
           const shift = shiftResult.data;
           const scheduledEndTime = shift.endTime;
-          const actualEndTime = record.punchOut;
+          const scheduledStartTime = shift.startTime;
+          //  下班時間可能帶有「(隔日)」標記（跨夜班），需先去除
+          const actualEndTime = String(record.punchOut || '').replace('(隔日)', '').trim();
+          const isOvernightPunch = String(record.punchOut || '').indexOf('(隔日)') !== -1;
           
-          if (scheduledEndTime && actualEndTime) {
-            // 解析時間（處理跨日班）
+          if (scheduledEndTime && actualEndTime && /^\d{1,2}:\d{2}$/.test(actualEndTime)) {
             const [schedHour, schedMin] = scheduledEndTime.split(':').map(Number);
             const [actualHour, actualMin] = actualEndTime.split(':').map(Number);
             
-            // 轉換為分鐘數（跨日班需要特殊處理）
             let schedMinutes = schedHour * 60 + schedMin;
             let actualMinutes = actualHour * 60 + actualMin;
             
-            // 如果是跨日班（下班時間 < 上班時間），下班時間加24小時
-            if (schedHour < 12) {
-              schedMinutes += 24 * 60;
+            //  跨日班的正確判斷：排班「下班時間早於上班時間」才是跨日
+            //  原本寫成「下班時間在中午前就算跨日」，早班（例如 06:00~11:00）
+            //  會被誤判成跨日班，硬加 24 小時後一律算成早退，扣款爆掉
+            let isOvernightShift = false;
+            if (scheduledStartTime && /^\d{1,2}:\d{2}$/.test(scheduledStartTime)) {
+              const [startHour, startMin] = scheduledStartTime.split(':').map(Number);
+              const startMinutes = startHour * 60 + startMin;
+              if (schedMinutes < startMinutes) {
+                isOvernightShift = true;
+                schedMinutes += 24 * 60;
+              }
             }
             
-            if (actualHour < 12 && record.punchIn && record.punchIn.startsWith('1')) {
+            // 實際下班若跨到隔天，同樣加 24 小時才能比較
+            if (isOvernightShift && isOvernightPunch) {
               actualMinutes += 24 * 60;
             }
             
-            // 計算早退分鐘數
             if (actualMinutes < schedMinutes) {
               const earlyMinutes = schedMinutes - actualMinutes;
               const earlyHours = earlyMinutes / 60;
@@ -2270,7 +2362,6 @@ function calculateMonthlySalaryInternal(employeeId, yearMonth) {
           }
         }
       } catch (shiftError) {
-        // 如果取得排班失敗，記錄警告但繼續處理
         Logger.log(`    ${date}: 無法取得排班資訊，跳過早退檢查`);
       }
     });

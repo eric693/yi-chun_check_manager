@@ -6168,21 +6168,26 @@ function sendLeaveBalance(replyToken, userId, employeeName) {
     
     for (let i = 1; i < values.length; i++) {
       if (values[i][0] === userId) {
+        //  欄位對照（假期餘額表共 19 欄）
+        //  A員工ID B姓名 C到職日 D特休 E未住院病假 F事假 G喪假 H婚假 I產假
+        //  J陪產 K住院病假 L生理假 M家庭照顧 N公假 O公傷 P天災 Q補休 R曠工 S更新時間
+        //  原本從 index 2 起算，漏掉了 C 欄（到職日），導致每個假別都往前位移一格
+        //  （LINE 顯示的「事假」其實是未住院病假的時數）
         balance = {
-          annual: values[i][2] || 0,
-          sick: values[i][3] || 0,
-          personal: values[i][4] || 0,
-          bereavement: values[i][5] || 0,
-          marriage: values[i][6] || 0,
-          maternity: values[i][7] || 0,
-          paternity: values[i][8] || 0,
-          hospitalization: values[i][9] || 0,
-          menstrual: values[i][10] || 0,
-          familyCare: values[i][11] || 0,
-          official: values[i][12] || 0,
-          workInjury: values[i][13] || 0,
-          disaster: values[i][14] || 0,
-          compTimeOff: values[i][15] || 0
+          annual: values[i][3] || 0,           // D: 特休假
+          sick: values[i][4] || 0,             // E: 未住院病假
+          personal: values[i][5] || 0,         // F: 事假
+          bereavement: values[i][6] || 0,      // G: 喪假
+          marriage: values[i][7] || 0,         // H: 婚假
+          maternity: values[i][8] || 0,        // I: 產假
+          paternity: values[i][9] || 0,        // J: 陪產檢及陪產假
+          hospitalization: values[i][10] || 0, // K: 住院病假
+          menstrual: values[i][11] || 0,       // L: 生理假
+          familyCare: values[i][12] || 0,      // M: 家庭照顧假
+          official: values[i][13] || 0,        // N: 公假
+          workInjury: values[i][14] || 0,      // O: 公傷假
+          disaster: values[i][15] || 0,        // P: 天然災害停班
+          compTimeOff: values[i][16] || 0      // Q: 加班補休假
         };
         break;
       }
@@ -6811,21 +6816,23 @@ function deductLeaveBalanceByUserId(userId, leaveType, hours) {
     
     const values = sheet.getDataRange().getValues();
     
+    //  欄位對照必須與 LeaveManagement.gs 的 deductLeaveBalance 一致
+    //  原本少算了 C 欄（到職日），核准事假會扣到「未住院病假」欄位
     const leaveTypeColumnMap = {
-      'ANNUAL_LEAVE': 3,
-      'SICK_LEAVE': 4,
-      'PERSONAL_LEAVE': 5,
-      'BEREAVEMENT_LEAVE': 6,
-      'MARRIAGE_LEAVE': 7,
-      'MATERNITY_LEAVE': 8,
-      'PATERNITY_LEAVE': 9,
-      'HOSPITALIZATION_LEAVE': 10,
-      'MENSTRUAL_LEAVE': 11,
-      'FAMILY_CARE_LEAVE': 12,
-      'OFFICIAL_LEAVE': 13,
-      'WORK_INJURY_LEAVE': 14,
-      'NATURAL_DISASTER_LEAVE': 15,
-      'COMP_TIME_OFF': 16
+      'ANNUAL_LEAVE': 4,            // D
+      'SICK_LEAVE': 5,              // E
+      'PERSONAL_LEAVE': 6,          // F
+      'BEREAVEMENT_LEAVE': 7,       // G
+      'MARRIAGE_LEAVE': 8,          // H
+      'MATERNITY_LEAVE': 9,         // I
+      'PATERNITY_LEAVE': 10,        // J
+      'HOSPITALIZATION_LEAVE': 11,  // K
+      'MENSTRUAL_LEAVE': 12,        // L
+      'FAMILY_CARE_LEAVE': 13,      // M
+      'OFFICIAL_LEAVE': 14,         // N
+      'WORK_INJURY_LEAVE': 15,      // O
+      'NATURAL_DISASTER_LEAVE': 16, // P
+      'COMP_TIME_OFF': 17           // Q
     };
     
     //  不受額度限制的假別（法定應給，餘額欄位預設 0 會導致永遠無法核准）
@@ -6864,7 +6871,7 @@ function deductLeaveBalanceByUserId(userId, leaveType, hours) {
         const newBalance = currentBalance - hours;
         
         sheet.getRange(i + 1, columnIndex).setValue(newBalance);
-        sheet.getRange(i + 1, 18).setValue(new Date());
+        sheet.getRange(i + 1, 19).setValue(new Date()); //  S 欄（原本寫到 R 欄「曠工」）
         
         Logger.log(' 餘額已更新');
         
