@@ -519,7 +519,24 @@ function initializeEmployeeLeave(sessionToken) {
       }
     }
     
-    const hireDate = new Date();
+    //  到職日應取自員工資料（G 欄），原本固定用「今天」
+    //  會讓每位新建立的員工到職日錯誤、特休一律算成 0 小時
+    let hireDate = new Date();
+    try {
+      const employeeData = findEmployeeByLineUserId_(user.userId);
+      if (employeeData.ok && employeeData.hireDate) {
+        const parsed = new Date(employeeData.hireDate);
+        if (!isNaN(parsed.getTime())) {
+          hireDate = parsed;
+          Logger.log(' 取得到職日: ' + Utilities.formatDate(hireDate, Session.getScriptTimeZone(), 'yyyy-MM-dd'));
+        }
+      } else {
+        Logger.log(' 員工資料沒有到職日，特休將以今天計算（請於員工資料補上到職日後重算）');
+      }
+    } catch (hireErr) {
+      Logger.log(' 讀取到職日失敗，改用今天: ' + hireErr.message);
+    }
+    
     const leaveInfo = getCurrentAnnualLeaveInfo(hireDate);
     const annualLeaveHours = leaveInfo.currentHours;
 

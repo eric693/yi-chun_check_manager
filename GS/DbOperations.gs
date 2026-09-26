@@ -1287,6 +1287,18 @@ function updateReviewStatus(rowNumber, status, note) {
     
     Logger.log(' 申請記錄:', record);
     
+    //  防重複審核：已審核過的申請不可再審
+    //  （原本沒有檢查，重複核准會在出勤記錄寫入兩筆補打卡）
+    const currentStatus = String(record[statusCol - 1] || '').trim();
+    if (currentStatus !== '待審核' && currentStatus !== '') {
+      Logger.log(` 此補打卡申請已審核過，目前狀態: ${currentStatus}`);
+      return {
+        ok: false,
+        code: "ERR_ALREADY_REVIEWED",
+        msg: `此補打卡申請已審核過（目前狀態：${currentStatus}）`
+      };
+    }
+    
     //  從補打卡申請工作表讀取資料
     const applicationId = record[headers.indexOf('申請ID')];
     const userId = record[headers.indexOf('用戶ID')];
