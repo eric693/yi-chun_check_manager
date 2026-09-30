@@ -192,8 +192,22 @@ function handleExchangeToken(otoken) {
 // ==================== 打卡功能相關 ====================
 
 function handlePunch(params) {
-  const { token, type, lat, lng, note } = params;
-  return punch(token, type, parseFloat(lat), parseFloat(lng), note);
+  const { token, type, lat, lng, note, remark } = params;
+  return punch(token, type, parseFloat(lat), parseFloat(lng), note, remark);
+}
+
+/**
+ *  取得待審核的打卡備註（管理員）
+ */
+function handleGetPendingPunchRemarks(params) {
+  return getPendingPunchRemarks(params.token);
+}
+
+/**
+ *  審核打卡備註（管理員）
+ */
+function handleReviewPunchRemark(params) {
+  return reviewPunchRemark(params.token, params.rowNumber, params.reviewAction, params.comment || '');
 }
 
 // function handleAdjustPunch(params) {

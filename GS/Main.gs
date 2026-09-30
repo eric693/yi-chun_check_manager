@@ -38,6 +38,10 @@ function doGet(e) {
         return respond1(handleLinePunchWithToken(e.parameter));
       case "adjustPunch":
         return respond1(handleAdjustPunch(e.parameter));
+      case "getPendingPunchRemarks":
+        return respond1(handleGetPendingPunchRemarks(e.parameter));
+      case "reviewPunchRemark":
+        return respond1(handleReviewPunchRemark(e.parameter));
       case "getAbnormalRecords":
         return respond1(handleGetAbnormalRecords(e.parameter));
       case "getAttendanceDetails":

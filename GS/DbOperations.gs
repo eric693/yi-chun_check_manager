@@ -432,7 +432,7 @@ function testCheckSession() {
 /**
  * 打卡功能（加入防重複：同一天同類型只能打一次）
  */
-function punch(sessionToken, type, lat, lng, note) {
+function punch(sessionToken, type, lat, lng, note, remark) {
   const employee = checkSession_(sessionToken);
   const user = employee.user;
   if (!user) return { ok: false, code: "ERR_SESSION_INVALID" };
@@ -488,6 +488,12 @@ function punch(sessionToken, type, lat, lng, note) {
     }
   }
 
+  //  員工自填備註（例如提早下班原因），需管理員審核
+  const remarkText = String(remark || '').trim();
+
+  //  確保表格有 K~N 四個備註欄位（欄位不足會導致寫入失敗）
+  ensurePunchRemarkHeaders_(sh);
+
   // 寫入打卡記錄
   const row = [
     new Date(),
@@ -499,12 +505,31 @@ function punch(sessionToken, type, lat, lng, note) {
     locationName,
     "",
     "",
-    note || ""
+    note || "",
+    remarkText,                          // K: 員工備註
+    remarkText ? '待審核' : '',          // L: 備註審核狀態
+    "",                                  // M: 備註審核人
+    ""                                   // N: 備註審核時間
   ];
   sh.getRange(sh.getLastRow() + 1, 1, 1, row.length).setValues([row]);
 
-  Logger.log('打卡成功: ' + user.name + ' - ' + type);
-  return { ok: true, code: "PUNCH_SUCCESS", params: { type: type } };
+  Logger.log('打卡成功: ' + user.name + ' - ' + type + (remarkText ? '（附備註，待審核）' : ''));
+
+  //  有備註時通知管理員
+  if (remarkText) {
+    try {
+      notifyAdminsNewPunchRemark_(user.name, type, remarkText);
+    } catch (notifyErr) {
+      Logger.log(' 備註通知管理員失敗（不影響打卡）: ' + notifyErr.message);
+    }
+  }
+
+  return {
+    ok: true,
+    code: "PUNCH_SUCCESS",
+    params: { type: type },
+    remarkSubmitted: !!remarkText
+  };
 }
 
 
@@ -2250,4 +2275,166 @@ function qrPunch(sessionToken, qrTokenId, locationName) {
 
   Logger.log('QR打卡成功: ' + user.name + ' - ' + punchType + ' - ' + loc);
   return { ok: true, code: 'PUNCH_SUCCESS', params: { type: punchType, location: loc } };
+}
+
+
+// ==================== 打卡備註（員工自填 + 管理員審核）====================
+
+/**
+ *  確保打卡紀錄表有備註相關欄位標題（K~N）
+ */
+function ensurePunchRemarkHeaders_(sheet) {
+  try {
+    //  欄位數不足時先補足到 14 欄（K~N）
+    if (sheet.getMaxColumns() < 14) {
+      sheet.insertColumnsAfter(sheet.getMaxColumns(), 14 - sheet.getMaxColumns());
+    }
+
+    const headers = sheet.getRange(1, 1, 1, 14).getValues()[0];
+    const wanted = ['員工備註', '備註審核狀態', '備註審核人', '備註審核時間'];
+
+    wanted.forEach(function (title, i) {
+      const col = 11 + i; // K, L, M, N
+      if (String(headers[col - 1] || '').trim() !== title) {
+        sheet.getRange(1, col).setValue(title).setFontWeight('bold');
+      }
+    });
+  } catch (err) {
+    Logger.log(' 補上打卡備註欄位標題失敗（不影響打卡）: ' + err.message);
+  }
+}
+
+/**
+ *  取得所有待審核的打卡備註（管理員用）
+ */
+function getPendingPunchRemarks(sessionToken) {
+  const session = checkSession_(sessionToken);
+  if (!session.ok || !session.user) {
+    return { ok: false, code: 'ERR_SESSION_INVALID' };
+  }
+
+  if (session.user.dept !== '管理員') {
+    return { ok: false, code: 'ERR_PERMISSION_DENIED', msg: '需要管理員權限' };
+  }
+
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_ATTENDANCE);
+  if (!sheet || sheet.getLastRow() < 2) {
+    return { ok: true, records: [] };
+  }
+
+  const values = sheet.getDataRange().getValues();
+  const tz = Session.getScriptTimeZone();
+  const records = [];
+
+  for (let i = 1; i < values.length; i++) {
+    const row = values[i];
+    if (String(row[11] || '').trim() !== '待審核') continue;
+
+    const punchTime = row[0] ? new Date(row[0]) : null;
+
+    records.push({
+      rowNumber: i + 1,
+      date: punchTime ? Utilities.formatDate(punchTime, tz, 'yyyy-MM-dd') : '',
+      time: punchTime ? Utilities.formatDate(punchTime, tz, 'HH:mm') : '',
+      userId: row[1],
+      employeeName: row[3],
+      type: row[4],
+      location: row[6],
+      remark: row[10]
+    });
+  }
+
+  // 最新的排前面
+  records.sort(function (a, b) {
+    return (b.date + b.time).localeCompare(a.date + a.time);
+  });
+
+  return { ok: true, records: records };
+}
+
+/**
+ *  審核打卡備註（核准／退回）
+ */
+function reviewPunchRemark(sessionToken, rowNumber, reviewAction, comment) {
+  const session = checkSession_(sessionToken);
+  if (!session.ok || !session.user) {
+    return { ok: false, code: 'ERR_SESSION_INVALID' };
+  }
+
+  if (session.user.dept !== '管理員') {
+    return { ok: false, code: 'ERR_PERMISSION_DENIED', msg: '需要管理員權限' };
+  }
+
+  const row = parseInt(rowNumber, 10);
+  if (isNaN(row) || row < 2) {
+    return { ok: false, msg: '無效的資料列' };
+  }
+
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_ATTENDANCE);
+  if (!sheet) {
+    return { ok: false, msg: '找不到打卡紀錄工作表' };
+  }
+
+  const record = sheet.getRange(row, 1, 1, 14).getValues()[0];
+
+  // 防重複審核
+  const currentStatus = String(record[11] || '').trim();
+  if (currentStatus !== '待審核') {
+    return {
+      ok: false,
+      code: 'ERR_ALREADY_REVIEWED',
+      msg: '此備註已審核過（目前狀態：' + (currentStatus || '無') + '）'
+    };
+  }
+
+  const approved = String(reviewAction).trim().toLowerCase() === 'approve';
+  const status = approved ? '已核准' : '已退回';
+
+  sheet.getRange(row, 12).setValue(status);
+  sheet.getRange(row, 13).setValue(session.user.name);
+  sheet.getRange(row, 14).setValue(new Date());
+
+  if (comment) {
+    // 審核意見附加在備註後方，保留員工原文
+    sheet.getRange(row, 11).setValue(String(record[10] || '') + '\n【審核意見】' + comment);
+  }
+
+  Logger.log('打卡備註審核完成: 第 ' + row + ' 列 → ' + status);
+
+  //  通知員工審核結果
+  try {
+    notifyEmployeePunchRemarkResult_(record[1], record[3], record[4], record[10], status, comment);
+  } catch (notifyErr) {
+    Logger.log(' 備註審核結果通知失敗（不影響審核）: ' + notifyErr.message);
+  }
+
+  return { ok: true, status: status };
+}
+
+/**
+ *  通知管理員有新的打卡備註待審核
+ */
+function notifyAdminsNewPunchRemark_(employeeName, punchType, remark) {
+  const text = '📝 新的打卡備註待審核\n\n' +
+               '員工：' + employeeName + '\n' +
+               '類型：' + punchType + '打卡\n' +
+               '備註：' + remark + '\n\n' +
+               '請到網頁版「管理員」分頁審核';
+
+  notifyAllAdmins_({ type: 'text', text: text });
+}
+
+/**
+ *  通知員工備註審核結果
+ */
+function notifyEmployeePunchRemarkResult_(userId, employeeName, punchType, remark, status, comment) {
+  if (!userId) return;
+
+  const icon = status === '已核准' ? '✅' : '↩️';
+  const text = icon + ' 打卡備註' + status + '\n\n' +
+               '類型：' + punchType + '打卡\n' +
+               '備註：' + remark +
+               (comment ? '\n審核意見：' + comment : '');
+
+  sendLineNotification_(userId, { type: 'text', text: text });
 }

@@ -2215,6 +2215,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             initShiftTab();
         } else if (tabId === 'admin-view') {
             fetchAndRenderReviewRequests();
+            loadPendingPunchRemarks();   //  下班打卡備註審核
             loadPendingOvertimeRequests();
             loadPendingWorklogs();  // 
             loadPendingLeaveRequests();
@@ -3843,7 +3844,20 @@ async function doPunch(type) {
     const button = document.getElementById(punchButtonId);
     const loadingText = t('LOADING') || '處理中...';
 
-    if (!button) return;
+    if (!button) {
+        _isPunching = false;   //  原本直接 return，鎖沒解開，之後就再也不能打卡
+        return;
+    }
+
+    //  下班打卡：讓員工可自行填寫備註（例如提早下班原因），送出後由管理員審核
+    let punchRemark = '';
+    if (type === '下班') {
+        punchRemark = await askPunchRemark();
+        if (punchRemark === null) {       // 使用者按取消
+            _isPunching = false;
+            return;
+        }
+    }
 
     generalButtonState(button, 'processing', loadingText);
     
@@ -3908,15 +3922,17 @@ async function doPunch(type) {
         const now = new Date();
         const datetime = now.toISOString();
 
-        const action = `punch&type=${encodeURIComponent(type)}&lat=${lat}&lng=${lng}&datetime=${encodeURIComponent(datetime)}&note=${encodeURIComponent(navigator.userAgent)}`;
+        const action = `punch&type=${encodeURIComponent(type)}&lat=${lat}&lng=${lng}&datetime=${encodeURIComponent(datetime)}&note=${encodeURIComponent(navigator.userAgent)}&remark=${encodeURIComponent(punchRemark || '')}`;
 
         // 行動網路不穩時自動重試；若前一次其實已寫入，後端會回 ERR_DUPLICATE_PUNCH，視為成功
-        const MAX_ATTEMPTS = 3;
+        const MAX_ATTEMPTS = 2;
         let res = null;
         let lastErr = null;
         for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             try {
-                res = await callApifetch(action, "loading", { silent: true, timeoutMs: 30000 });
+                //  逾時由 30 秒縮短為 12 秒、重試由 3 次改為 2 次
+                //  （原本最久會卡在「處理中」將近 95 秒，看起來像當掉）
+                res = await callApifetch(action, "loading", { silent: true, timeoutMs: 12000 });
                 if (attempt > 1 && res.code === 'ERR_DUPLICATE_PUNCH') {
                     res = { ok: true, code: 'PUNCH_SUCCESS', params: { type: type } };
                 }
@@ -3925,8 +3941,9 @@ async function doPunch(type) {
                 lastErr = err;
                 console.error(`打卡第 ${attempt} 次失敗:`, err);
                 if (attempt < MAX_ATTEMPTS) {
-                    showNotification(`連線不穩，正在重試（${attempt}/${MAX_ATTEMPTS - 1}）...`, 'warning');
-                    await new Promise(r => setTimeout(r, 1500 * attempt));
+                    generalButtonState(button, 'processing', '重試中...');
+                    showNotification('連線不穩，正在重試...', 'warning');
+                    await new Promise(r => setTimeout(r, 1200));
                 }
             }
         }
@@ -3937,6 +3954,10 @@ async function doPunch(type) {
                     ? t(res.code, res.params || {})
                     : (res.msg || t(res.code || "UNKNOWN_ERROR", res.params || {}));
                 showNotification(msg, res.ok ? "success" : "error");
+
+                if (res.ok && res.remarkSubmitted) {
+                    showNotification('備註已送出，等待管理員審核', 'info');
+                }
 
                 if (res.ok && type === '上班') {
                     clearShiftCache();
@@ -5212,6 +5233,193 @@ async function handleLinePunchFromUrl() {
         const geoErrors = { 1: '請允許位置存取權限後重試', 3: 'GPS 逾時，請確認定位已開啟' };
         setResult('❌', '無法取得位置', geoErrors[err.code] || '請確認 GPS 已開啟', '#f44336');
     }
+}
+
+// ==================== 下班打卡備註（員工自填 + 管理員審核）====================
+
+/**
+ *  下班打卡前詢問備註
+ *  回傳：填寫的備註字串（可為空字串代表不填），按取消則回傳 null
+ *  註：LINE 內建瀏覽器會擋 prompt()，所以自建對話框
+ */
+function askPunchRemark() {
+    return new Promise((resolve) => {
+        const today = new Date();
+        const dateLabel = `${today.getMonth() + 1}/${today.getDate()}`;
+        const timeLabel = `${String(today.getHours()).padStart(2, '0')}:${String(today.getMinutes()).padStart(2, '0')}`;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'punch-remark-overlay';
+        overlay.style.cssText =
+            'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9998;' +
+            'display:flex;align-items:center;justify-content:center;padding:16px;';
+
+        overlay.innerHTML = `
+            <div style="background:#fff;border-radius:16px;max-width:420px;width:100%;padding:20px;box-shadow:0 10px 40px rgba(0,0,0,0.3);">
+                <div style="font-size:18px;font-weight:700;color:#111;margin-bottom:6px;">下班打卡備註</div>
+                <div style="font-size:13px;color:#666;line-height:1.5;margin-bottom:12px;">
+                    若今天提早下班或有特殊狀況，請在此說明。<br>
+                    送出後會通知管理員審核。沒有要說明可直接按「不填，直接打卡」。
+                </div>
+                <textarea id="punch-remark-input" rows="3" maxlength="200"
+                    placeholder="例如：今日 ${dateLabel} ${timeLabel} 下班，今日工事已完成"
+                    style="width:100%;padding:10px;border:1px solid #d1d5db;border-radius:10px;font-size:15px;
+                           box-sizing:border-box;resize:vertical;color:#111;background:#fff;"></textarea>
+                <div style="font-size:12px;color:#999;margin-top:4px;text-align:right;">
+                    <span id="punch-remark-count">0</span>/200
+                </div>
+                <div style="display:flex;flex-direction:column;gap:8px;margin-top:14px;">
+                    <button id="punch-remark-submit"
+                        style="width:100%;padding:12px;border:none;border-radius:10px;background:#4f46e5;color:#fff;font-size:16px;font-weight:700;">
+                        送出備註並打卡
+                    </button>
+                    <button id="punch-remark-skip"
+                        style="width:100%;padding:12px;border:1px solid #d1d5db;border-radius:10px;background:#fff;color:#374151;font-size:15px;font-weight:600;">
+                        不填，直接打卡
+                    </button>
+                    <button id="punch-remark-cancel"
+                        style="width:100%;padding:10px;border:none;border-radius:10px;background:transparent;color:#9ca3af;font-size:14px;">
+                        取消
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(overlay);
+
+        const input = overlay.querySelector('#punch-remark-input');
+        const counter = overlay.querySelector('#punch-remark-count');
+
+        input.addEventListener('input', () => {
+            counter.textContent = input.value.length;
+        });
+
+        const close = (value) => {
+            overlay.remove();
+            resolve(value);
+        };
+
+        overlay.querySelector('#punch-remark-submit').onclick = () => {
+            const text = input.value.trim();
+            if (!text) {
+                showNotification('請輸入備註內容，或選擇「不填，直接打卡」', 'warning');
+                return;
+            }
+            close(text);
+        };
+        overlay.querySelector('#punch-remark-skip').onclick = () => close('');
+        overlay.querySelector('#punch-remark-cancel').onclick = () => close(null);
+
+        setTimeout(() => input.focus(), 100);
+    });
+}
+
+/**
+ *  載入待審核的打卡備註（管理員）
+ */
+async function loadPendingPunchRemarks() {
+    const listEl = document.getElementById('punch-remarks-list');
+    const loadingEl = document.getElementById('punch-remarks-loading');
+    const emptyEl = document.getElementById('punch-remarks-empty');
+
+    if (!listEl) return;
+
+    try {
+        if (loadingEl) loadingEl.style.display = 'block';
+        if (emptyEl) emptyEl.style.display = 'none';
+        listEl.innerHTML = '';
+
+        const res = await callApifetch('getPendingPunchRemarks', 'punch-remarks-loading');
+
+        if (loadingEl) loadingEl.style.display = 'none';
+
+        if (!res.ok || !res.records || res.records.length === 0) {
+            if (emptyEl) emptyEl.style.display = 'block';
+            return;
+        }
+
+        res.records.forEach(record => {
+            const item = document.createElement('div');
+            item.className = 'p-4 border border-gray-200 dark:border-gray-700 rounded-lg';
+            item.innerHTML = `
+                <div class="flex justify-between items-start mb-2">
+                    <div>
+                        <span class="font-bold text-gray-800 dark:text-white">${escapeHtml(record.employeeName || '')}</span>
+                        <span class="ml-2 text-sm ${record.type === '上班' ? 'text-green-600' : 'text-orange-600'}">${escapeHtml(record.type || '')}打卡</span>
+                    </div>
+                    <span class="text-sm text-gray-500 dark:text-gray-400">${escapeHtml(record.date || '')} ${escapeHtml(record.time || '')}</span>
+                </div>
+                <div class="p-3 bg-gray-50 dark:bg-gray-700/50 rounded text-sm text-gray-700 dark:text-gray-200 whitespace-pre-wrap mb-3">${escapeHtml(record.remark || '')}</div>
+                <div class="flex gap-2">
+                    <button class="approve-remark-btn flex-1 py-2 rounded-lg font-bold text-white bg-green-600" data-row="${record.rowNumber}">核准</button>
+                    <button class="reject-remark-btn flex-1 py-2 rounded-lg font-bold text-gray-700 bg-gray-200 dark:bg-gray-600 dark:text-white" data-row="${record.rowNumber}">退回</button>
+                </div>
+            `;
+            listEl.appendChild(item);
+        });
+
+        listEl.querySelectorAll('.approve-remark-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => handleReviewPunchRemark(e.currentTarget, 'approve'));
+        });
+        listEl.querySelectorAll('.reject-remark-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => handleReviewPunchRemark(e.currentTarget, 'reject'));
+        });
+
+    } catch (error) {
+        console.error('載入打卡備註失敗:', error);
+        if (loadingEl) loadingEl.style.display = 'none';
+        if (emptyEl) emptyEl.style.display = 'block';
+    }
+}
+
+/**
+ *  審核打卡備註
+ */
+async function handleReviewPunchRemark(button, action) {
+    const rowNumber = button.dataset.row;
+    let comment = '';
+
+    if (action === 'reject') {
+        comment = prompt('請輸入退回原因（可留空）：') || '';
+    }
+
+    button.disabled = true;
+    const originalText = button.textContent;
+    button.textContent = '處理中...';
+
+    try {
+        const res = await callApifetch(
+            `reviewPunchRemark&rowNumber=${encodeURIComponent(rowNumber)}` +
+            `&reviewAction=${action}` +
+            `&comment=${encodeURIComponent(comment)}`
+        );
+
+        if (res.ok) {
+            showNotification(action === 'approve' ? '已核准' : '已退回', 'success');
+            await loadPendingPunchRemarks();
+        } else {
+            showNotification(res.msg || '審核失敗', 'error');
+            button.disabled = false;
+            button.textContent = originalText;
+        }
+    } catch (err) {
+        console.error('審核打卡備註失敗:', err);
+        showNotification('網路錯誤，請稍後再試', 'error');
+        button.disabled = false;
+        button.textContent = originalText;
+    }
+}
+
+/**
+ *  簡易 HTML escape，避免員工備註內容破壞版面
+ */
+function escapeHtml(text) {
+    return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 // ==================== QR Code 打卡系統 ====================
