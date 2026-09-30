@@ -281,19 +281,6 @@ function getMonthlySalarySheetEnhanced() {
   return sheet;
 }
 
-function rebuildMonthlySalarySheet() {
-  // 刪除舊表（如果存在）
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const oldSheet = ss.getSheetByName('月薪資記錄');
-  if (oldSheet) {
-    ss.deleteSheet(oldSheet);
-  }
-  
-  // 建立新表
-  getMonthlySalarySheetEnhanced();
-  
-  Logger.log(' 月薪資記錄試算表已重建');
-}
 // ==================== 薪資設定功能 ====================
 
 /**

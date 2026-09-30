@@ -1,3 +1,59 @@
+// ==================== 共用日期格式化 ====================
+//  原本 formatDate 有 4 份、formatDateTime 有 3 份散在不同檔案，
+//  Apps Script 共用同一個命名空間，只有最後載入的那份會生效，
+//  其餘會被無聲覆蓋。這裡合併成單一版本，相容原本各版本的用法。
+
+/**
+ * 格式化為 yyyy-MM-dd
+ * 可接受 Date 物件、日期字串或空值
+ */
+function formatDate(date) {
+  if (!date) return '';
+
+  try {
+    if (date instanceof Date) {
+      if (isNaN(date.getTime())) return '';
+      return Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    }
+
+    if (typeof date === 'string') {
+      // 已經是 yyyy-MM-dd 開頭就直接取前 10 碼
+      if (/^\d{4}-\d{2}-\d{2}/.test(date)) return date.substring(0, 10);
+    }
+
+    const parsed = new Date(date);
+    if (isNaN(parsed.getTime())) return String(date);
+
+    return Utilities.formatDate(parsed, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+
+  } catch (e) {
+    return String(date);
+  }
+}
+
+/**
+ * 格式化為 yyyy-MM-dd HH:mm:ss
+ * 可接受 Date 物件、日期字串或空值
+ */
+function formatDateTime(date) {
+  if (!date) return '';
+
+  try {
+    if (date instanceof Date) {
+      if (isNaN(date.getTime())) return '';
+      return Utilities.formatDate(date, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+    }
+
+    const parsed = new Date(date);
+    if (isNaN(parsed.getTime())) return String(date);
+
+    return Utilities.formatDate(parsed, Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
+
+  } catch (e) {
+    return String(date);
+  }
+}
+
 // Utils.gs
 
 function jsonp(e, obj) {

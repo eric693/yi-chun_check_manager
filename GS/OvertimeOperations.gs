@@ -416,14 +416,6 @@ function addCompTimeOffBalance_(userId, hours) {
   }
 }
 
-/**
- * 格式化日期
- */
-function formatDate(date) {
-  if (!date) return "";
-  if (typeof date === "string") return date;
-  return Utilities.formatDate(date, "Asia/Taipei", "yyyy-MM-dd");
-}
 
 /**
  *  升級工具：為現有工作表新增補休時數欄位（只需執行一次）

@@ -220,57 +220,6 @@ function generateRecentMonths(count) {
   return months;
 }
 
-/**
- *  發送指定月份的打卡記錄
- * 
- * 功能:
- * - 顯示該月份所有的上下班打卡記錄
- * - 按日期分組顯示
- * - 包含統計資訊（總天數、總工時）
- * - 使用 Flex Message Carousel 分頁顯示（如果記錄太多）
- */
-function sendMonthlyRecords(replyToken, userId, employeeName, yearMonth) {
-  try {
-    Logger.log(' 發送月份打卡記錄');
-    Logger.log('   userId: ' + userId);
-    Logger.log('   yearMonth: ' + yearMonth);
-    
-    // 驗證月份格式
-    if (!yearMonth.match(/^\d{4}-\d{2}$/)) {
-      replyMessage(replyToken, ' 月份格式錯誤\n\n請重新選擇月份');
-      return;
-    }
-    
-    // 從資料庫取得該月份的打卡記錄
-    const records = getMonthlyPunchRecords(userId, yearMonth);
-    
-    if (records.length === 0) {
-      const monthLabel = yearMonth.replace('-', '年') + '月';
-      replyMessage(replyToken, ` ${monthLabel}\n\n${employeeName}，您這個月還沒有打卡記錄`);
-      return;
-    }
-    
-    // 按日期分組
-    const groupedRecords = groupRecordsByDate(records);
-    
-    // 計算統計資訊
-    const stats = calculateMonthlyStats(groupedRecords);
-    
-    // 建立 Flex Message
-    // 如果記錄太多（超過 10 天），使用 Carousel 分頁顯示
-    if (Object.keys(groupedRecords).length > 10) {
-      sendMonthlyRecordsCarousel(replyToken, employeeName, yearMonth, groupedRecords, stats);
-    } else {
-      sendMonthlyRecordsSingle(replyToken, employeeName, yearMonth, groupedRecords, stats);
-    }
-    
-    Logger.log(' 月份打卡記錄已發送');
-    
-  } catch (error) {
-    Logger.log(' sendMonthlyRecords 錯誤: ' + error);
-    replyMessage(replyToken, ' 查詢失敗，請稍後再試');
-  }
-}
 
 function getMonthlyPunchRecords(userId, yearMonth) {
   try {
