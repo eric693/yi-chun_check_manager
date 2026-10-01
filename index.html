@@ -1580,13 +1580,55 @@
                     <!-- QR Code 打卡管理 -->
                     <div class="card p-6 mt-6">
                         <h2 class="text-xl font-bold text-gray-800 dark:text-white mb-2">QR Code 打卡管理</h2>
-                        <p class="text-gray-500 dark:text-gray-400 mb-4">產生限時 QR Code，讓員工掃描打卡，無需 GPS 定位。</p>
+                        <p class="text-gray-500 dark:text-gray-400 mb-4">產生 QR Code 讓員工掃描打卡，<strong>完全不使用 GPS 定位</strong>，可避免定位飄移問題。</p>
+
+                        <!--  操作說明 -->
+                        <details class="mb-4 p-4 bg-indigo-50 dark:bg-indigo-900/30 rounded-lg">
+                            <summary class="font-bold text-indigo-700 dark:text-indigo-300 cursor-pointer">
+                                操作步驟說明（點此展開）
+                            </summary>
+                            <div class="mt-3 text-sm text-gray-700 dark:text-gray-200 space-y-3">
+                                <div>
+                                    <p class="font-bold mb-1">辦公室張貼用（建議）</p>
+                                    <ol class="list-decimal list-inside space-y-1">
+                                        <li>打卡類型選「<strong>自動判斷</strong>」——一張 QR 上下班都能用</li>
+                                        <li>有效時間選「<strong>永久有效</strong>」——不用每天重印</li>
+                                        <li>地點名稱填辦公室名稱，例如「台北辦公室」</li>
+                                        <li>按「產生 QR Code」</li>
+                                        <li>按「<strong>列印張貼用 QR Code</strong>」，印出來貼在門口或打卡區</li>
+                                    </ol>
+                                </div>
+                                <div>
+                                    <p class="font-bold mb-1">員工怎麼打卡</p>
+                                    <ol class="list-decimal list-inside space-y-1">
+                                        <li>用手機相機或 LINE 掃描張貼的 QR Code</li>
+                                        <li>自動開啟「出勤管家」（未登入會先要求用 LINE 登入）</li>
+                                        <li>看到「QR 打卡成功」就完成，記錄會寫入出勤紀錄</li>
+                                    </ol>
+                                </div>
+                                <div>
+                                    <p class="font-bold mb-1">注意事項</p>
+                                    <ul class="list-disc list-inside space-y-1">
+                                        <li>同一天同一種類型只能打一次，重複掃不會重複記錄</li>
+                                        <li>QR 打卡<strong>不檢查位置</strong>，被拍照傳出去的人可以在外面打卡。若要防代打，請改用「限時」QR 顯示在辦公室螢幕上</li>
+                                        <li>員工必須先用 LINE 登入過系統，才能用 QR 打卡</li>
+                                    </ul>
+                                </div>
+                            </div>
+                        </details>
 
                         <div class="space-y-4">
                             <!-- 打卡類型 -->
                             <div>
                                 <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">打卡類型</label>
-                                <div class="flex space-x-3">
+                                <div class="flex items-center mb-2">
+                                        <input type="radio" name="qr-punch-type" value="自動" id="qr-type-auto"
+                                               class="mr-2">
+                                        <label for="qr-type-auto" class="text-gray-700 dark:text-gray-300">
+                                            自動判斷（同一張可打上下班，建議辦公室張貼用）
+                                        </label>
+                                    </div>
+                                    <div class="flex space-x-3">
                                     <label class="flex items-center space-x-2 cursor-pointer">
                                         <input type="radio" name="qr-punch-type" value="上班" id="qr-type-in" checked
                                                class="text-indigo-600">
@@ -1612,6 +1654,8 @@
                                     <option value="15">15 分鐘</option>
                                     <option value="30">30 分鐘</option>
                                     <option value="60">60 分鐘</option>
+                                    <option value="480">8 小時</option>
+                                    <option value="PERM">永久有效（張貼在辦公室用）</option>
                                     <option value="custom">自訂...</option>
                                 </select>
                                 <input type="number" id="qr-valid-minutes-custom" min="1" max="1440"
@@ -1664,6 +1708,12 @@
                                 </div>
 
                                 <!-- 重新產生按鈕 -->
+                                <button id="qr-print-btn"
+                                        onclick="printOfficeQRCode()"
+                                        class="w-full mt-3 py-3 px-4 rounded-lg font-bold bg-indigo-600 text-white">
+                                    列印張貼用 QR Code
+                                </button>
+
                                 <button id="qr-regenerate-btn" style="display:none;"
                                         onclick="generateAdminQRCode()"
                                         class="mt-4 w-full py-2 px-4 rounded-lg font-bold btn-primary">

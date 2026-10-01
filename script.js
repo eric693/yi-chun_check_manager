@@ -5427,6 +5427,7 @@ function escapeHtml(text) {
 let _qrCountdownInterval = null;
 let _qrExpiryTime = null;
 let _qrTotalMs = null;
+let _currentQRInfo = null;   //  目前顯示的 QR 資訊（供列印使用）
 
 /**
  * 處理登入後待執行的 QR 打卡
@@ -5482,18 +5483,23 @@ async function performQRPunch(qrTokenId) {
 async function generateAdminQRCode() {
     const punchTypeEl = document.querySelector('input[name="qr-punch-type"]:checked');
     const punchType   = punchTypeEl ? punchTypeEl.value : '上班';
-    const typeCode    = punchType === '上班' ? 'I' : 'O';
+    //  A = 自動判斷（今天還沒打上班就記上班，否則記下班）
+    const typeCode    = punchType === '自動' ? 'A' : (punchType === '上班' ? 'I' : 'O');
 
     const validSelect = document.getElementById('qr-valid-minutes');
-    let validMinutes;
-    if (validSelect.value === 'custom') {
-        validMinutes = parseInt(document.getElementById('qr-valid-minutes-custom').value);
-        if (!validMinutes || validMinutes < 1 || validMinutes > 1440) {
-            showNotification('請輸入有效的分鐘數（1~1440）', 'error');
-            return;
+    let validMinutes = null;          // null 代表永久有效
+    const isPermanent = validSelect.value === 'PERM';
+
+    if (!isPermanent) {
+        if (validSelect.value === 'custom') {
+            validMinutes = parseInt(document.getElementById('qr-valid-minutes-custom').value);
+            if (!validMinutes || validMinutes < 1 || validMinutes > 1440) {
+                showNotification('請輸入有效的分鐘數（1~1440）', 'error');
+                return;
+            }
+        } else {
+            validMinutes = parseInt(validSelect.value);
         }
-    } else {
-        validMinutes = parseInt(validSelect.value);
     }
 
     const locationName = (document.getElementById('qr-location-name').value || '').trim();
@@ -5504,15 +5510,24 @@ async function generateAdminQRCode() {
 
     try {
         // 純前端產生 token，不呼叫後端
-        const expiryMs  = Date.now() + validMinutes * 60 * 1000;
-        const expiryHex = expiryMs.toString(16).toUpperCase();
+        const expiryMs  = isPermanent ? null : Date.now() + validMinutes * 60 * 1000;
+        const expiryPart = isPermanent ? 'PERM' : expiryMs.toString(16).toUpperCase();
         const random    = Math.random().toString(16).slice(2, 10).toUpperCase();
-        const tokenId   = `${typeCode}_${expiryHex}_${random}`;
+        const tokenId   = `${typeCode}_${expiryPart}_${random}`;
+
+        //  記住目前這張 QR 的資訊，供列印使用
+        _currentQRInfo = {
+            url: null,              // 下方組好後填入
+            punchType: punchType,
+            locationName: locationName,
+            isPermanent: isPermanent
+        };
 
         // 組成員工掃描後開啟的 URL
         const redirectUrl = API_CONFIG.redirectUrl.replace(/\/$/, '');
         const locParam    = locationName ? `&loc=${encodeURIComponent(locationName)}` : '';
         const punchUrl    = `${redirectUrl}/?qrToken=${tokenId}${locParam}`;
+        _currentQRInfo.url = punchUrl;
 
         // 使用 qrcodejs 在瀏覽器端直接產生 QR Code（同步，不需要 Promise）
         const qrContainer = document.getElementById('qr-image');
@@ -5528,8 +5543,8 @@ async function generateAdminQRCode() {
 
         // 標籤顯示
         const typeBadge = document.getElementById('qr-type-badge');
-        typeBadge.textContent = punchType === '上班' ? '上班打卡' : '下班打卡';
-        typeBadge.className   = punchType === '上班'
+        typeBadge.textContent = punchType === '自動' ? '上下班通用' : (punchType === '上班' ? '上班打卡' : '下班打卡');
+        typeBadge.className   = (punchType === '上班' || punchType === '自動')
             ? 'inline-block px-3 py-1 rounded-full text-sm font-bold mb-3 bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300'
             : 'inline-block px-3 py-1 rounded-full text-sm font-bold mb-3 bg-orange-100 dark:bg-orange-900 text-orange-700 dark:text-orange-300';
 
@@ -5547,14 +5562,25 @@ async function generateAdminQRCode() {
         document.getElementById('qr-image').style.opacity               = '1';
         document.getElementById('qr-countdown-container').style.display = 'block';
 
-        // 啟動倒數計時
-        _qrExpiryTime = expiryMs;
-        _qrTotalMs    = validMinutes * 60 * 1000;
-        if (_qrCountdownInterval) clearInterval(_qrCountdownInterval);
-        _tickQRCountdown();
-        _qrCountdownInterval = setInterval(_tickQRCountdown, 1000);
+        if (isPermanent) {
+            //  永久有效：不倒數，直接顯示提示
+            if (_qrCountdownInterval) clearInterval(_qrCountdownInterval);
+            _qrCountdownInterval = null;
+            _qrExpiryTime = null;
+            document.getElementById('qr-countdown').textContent = '永久有效';
+            document.getElementById('qr-countdown').className = 'text-2xl font-bold text-green-600 dark:text-green-400';
+            document.getElementById('qr-progress-fill').style.width = '100%';
+            showNotification('永久有效的 QR Code 已產生，可列印張貼', 'success');
+        } else {
+            // 啟動倒數計時
+            _qrExpiryTime = expiryMs;
+            _qrTotalMs    = validMinutes * 60 * 1000;
+            if (_qrCountdownInterval) clearInterval(_qrCountdownInterval);
+            _tickQRCountdown();
+            _qrCountdownInterval = setInterval(_tickQRCountdown, 1000);
 
-        showNotification(`QR Code 已產生，${validMinutes} 分鐘內有效`, 'success');
+            showNotification(`QR Code 已產生，${validMinutes} 分鐘內有效`, 'success');
+        }
 
     } catch (err) {
         console.error('generateAdminQRCode 錯誤:', err);
@@ -5563,6 +5589,125 @@ async function generateAdminQRCode() {
         btn.disabled    = false;
         btn.textContent = '產生 QR Code';
     }
+}
+
+/**
+ *  列印張貼用的 QR Code 海報（含員工操作步驟）
+ */
+function printOfficeQRCode() {
+    if (!_currentQRInfo || !_currentQRInfo.url) {
+        showNotification('請先產生 QR Code', 'warning');
+        return;
+    }
+
+    const info = _currentQRInfo;
+
+    // 用隱藏容器重新產生一張較大的 QR 圖，取出 data URL
+    const temp = document.createElement('div');
+    temp.style.cssText = 'position:fixed;left:-9999px;top:-9999px;';
+    document.body.appendChild(temp);
+
+    new QRCode(temp, {
+        text: info.url,
+        width: 600,
+        height: 600,
+        colorDark: '#1e1b4b',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.M
+    });
+
+    // qrcode.js 產生的可能是 canvas 或 img，稍等它畫完再取圖
+    setTimeout(() => {
+        let dataUrl = '';
+        const canvas = temp.querySelector('canvas');
+        const img = temp.querySelector('img');
+
+        if (canvas) {
+            dataUrl = canvas.toDataURL('image/png');
+        } else if (img) {
+            dataUrl = img.src;
+        }
+
+        temp.remove();
+
+        if (!dataUrl) {
+            showNotification('產生列印圖片失敗，請改用螢幕截圖', 'error');
+            return;
+        }
+
+        const typeLabel = info.punchType === '自動'
+            ? '上下班打卡皆可使用'
+            : (info.punchType + '打卡專用');
+
+        const validLabel = info.isPermanent
+            ? '本 QR Code 長期有效'
+            : '本 QR Code 有使用期限，過期請洽管理員';
+
+        const title = info.locationName ? (info.locationName + ' 打卡') : '出勤打卡';
+
+        const win = window.open('', '_blank');
+        if (!win) {
+            showNotification('瀏覽器擋住了列印視窗，請允許彈出視窗', 'error');
+            return;
+        }
+
+        win.document.write(`
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>${title} QR Code</title>
+<style>
+  @page { size: A4 portrait; margin: 15mm; }
+  body { font-family: "Microsoft JhengHei", "PingFang TC", sans-serif; text-align: center;
+         color: #111; margin: 0; padding: 20px; }
+  h1 { font-size: 34px; margin: 0 0 6px; }
+  .type { display: inline-block; font-size: 20px; font-weight: bold; color: #fff;
+          background: #4f46e5; padding: 8px 24px; border-radius: 999px; margin-bottom: 18px; }
+  .qr { margin: 10px auto 14px; }
+  .qr img { width: 420px; height: 420px; }
+  .steps { text-align: left; max-width: 520px; margin: 0 auto; background: #f8f8ff;
+           border: 2px solid #e0e0f0; border-radius: 12px; padding: 18px 24px; }
+  .steps h2 { font-size: 20px; margin: 0 0 10px; color: #4f46e5; }
+  .steps ol { font-size: 17px; line-height: 1.9; margin: 0; padding-left: 22px; }
+  .note { font-size: 14px; color: #666; margin-top: 14px; line-height: 1.6; }
+  @media print { .no-print { display: none; } }
+</style>
+</head>
+<body>
+  <h1>${title}</h1>
+  <div class="type">${typeLabel}</div>
+  <div class="qr"><img src="${dataUrl}" alt="打卡 QR Code"></div>
+
+  <div class="steps">
+    <h2>打卡步驟</h2>
+    <ol>
+      <li>用手機相機或 LINE 掃描上方 QR Code</li>
+      <li>畫面會自動開啟「出勤管家」</li>
+      <li>若尚未登入，請先用 LINE 帳號登入</li>
+      <li>看到「QR 打卡成功」的綠色訊息就完成了</li>
+    </ol>
+  </div>
+
+  <p class="note">
+    ${validLabel}<br>
+    掃描後請務必確認螢幕出現「打卡成功」再離開。<br>
+    同一天同一種類型只能打一次，重複掃描不會重複記錄。
+  </p>
+
+  <p class="no-print" style="margin-top:24px;">
+    <button onclick="window.print()"
+            style="padding:12px 28px;font-size:16px;font-weight:bold;background:#4f46e5;
+                   color:#fff;border:none;border-radius:8px;cursor:pointer;">
+      列印這張海報
+    </button>
+  </p>
+</body>
+</html>
+        `);
+        win.document.close();
+
+    }, 300);
 }
 
 /**

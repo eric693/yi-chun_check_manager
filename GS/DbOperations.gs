@@ -2196,19 +2196,32 @@ function qrPunch(sessionToken, qrTokenId, locationName) {
   }
   const user = session.user;
 
-  // 解析 token 格式：{I|O}_{EXPIRY_HEX}_{RANDOM}
-  const match = String(qrTokenId).match(/^([IO])_([0-9A-Fa-f]+)_([0-9A-Za-z]+)$/);
+  // 解析 token 格式：{I|O|A}_{EXPIRY_HEX 或 PERM}_{RANDOM}
+  //  I = 上班、O = 下班、A = 自動判斷（同一張 QR 可打上下班）
+  //  PERM = 永久有效（適合張貼在辦公室的常駐 QR）
+  const match = String(qrTokenId).match(/^([IOA])_(PERM|[0-9A-Fa-f]+)_([0-9A-Za-z]+)$/);
   if (!match) {
     return { ok: false, code: 'ERR_QR_INVALID', msg: 'QR Code 格式無效' };
   }
 
-  const typeCode  = match[1];
-  const expiryMs  = parseInt(match[2], 16);
-  const punchType = typeCode === 'I' ? '上班' : '下班';
-  const loc       = (locationName || '').trim() || 'QR打卡';
+  const typeCode   = match[1];
+  const expiryPart = match[2];
+  const loc        = (locationName || '').trim() || 'QR打卡';
 
-  if (isNaN(expiryMs) || Date.now() > expiryMs) {
-    return { ok: false, code: 'ERR_QR_EXPIRED', msg: 'QR Code 已過期，請管理員重新產生' };
+  // 有效期檢查（PERM 不檢查）
+  if (expiryPart !== 'PERM') {
+    const expiryMs = parseInt(expiryPart, 16);
+    if (isNaN(expiryMs) || Date.now() > expiryMs) {
+      return { ok: false, code: 'ERR_QR_EXPIRED', msg: 'QR Code 已過期，請管理員重新產生' };
+    }
+  }
+
+  //  自動判斷打卡類型：今天還沒打上班卡就記上班，否則記下班
+  let punchType;
+  if (typeCode === 'A') {
+    punchType = determineQrPunchType_(user.userId);
+  } else {
+    punchType = typeCode === 'I' ? '上班' : '下班';
   }
 
   // 防重複：同一員工同一天同類型只能打一次
@@ -2398,4 +2411,39 @@ function notifyEmployeePunchRemarkResult_(userId, employeeName, punchType, remar
                (comment ? '\n審核意見：' + comment : '');
 
   sendLineNotification_(userId, { type: 'text', text: text });
+}
+
+
+/**
+ *  判斷 QR 自動打卡應記為上班或下班
+ *  今天尚未打上班卡 → 上班；已打上班卡 → 下班
+ */
+function determineQrPunchType_(userId) {
+  try {
+    const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_ATTENDANCE);
+    if (!sheet || sheet.getLastRow() < 2) return '上班';
+
+    const today = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    const values = sheet.getDataRange().getValues();
+
+    let hasPunchIn = false;
+
+    for (let i = 1; i < values.length; i++) {
+      const row = values[i];
+      if (!row[0]) continue;
+      if (String(row[1]).trim() !== userId) continue;
+      if (String(row[7] || '').trim() === '補打卡') continue;
+
+      const rowDate = Utilities.formatDate(new Date(row[0]), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+      if (rowDate !== today) continue;
+
+      if (String(row[4]).trim() === '上班') hasPunchIn = true;
+    }
+
+    return hasPunchIn ? '下班' : '上班';
+
+  } catch (error) {
+    Logger.log(' determineQrPunchType_ 錯誤: ' + error);
+    return '上班';
+  }
 }
